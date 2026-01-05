@@ -11,7 +11,7 @@ def train_custom_model():
     # epochs: 訓練輪數，建議先設 30-50 跑跑看 (大約需 1-2 小時，視顯卡而定)
     # imgsz: 圖片大小，通常 640
     results = model.train(
-        data='Smart_Fridge/data.yaml', # 修改這裡！
+        data='ingredients_dataset/class100_yolov11/data.yaml', # 修改這裡！
         epochs=5, 
         imgsz=640,
         batch=16,

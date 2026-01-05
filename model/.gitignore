@@ -207,3 +207,8 @@ config.ini
 
 
 /Smart_Fridge
+
+/ingredients_dataset
+
+# Custom Virtual Environment
+py310_yolov11/
