@@ -212,3 +212,4 @@ config.ini
 
 # Custom Virtual Environment
 py310_yolov11/
+runs/

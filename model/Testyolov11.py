@@ -4,18 +4,18 @@ import cv2
 # --- 設定路徑 ---
 # 請去你的專案資料夾找 'runs/detect/train(數字)/weights/best.pt'
 # 注意：如果不確定是 train 幾號，請找日期最新的那個資料夾
-custom_model_path = 'runs/detect/tibame_food_model2/weights/best.pt' 
+custom_model_path = './ingredients_dataset/0107_best.pt' 
 
 # 載入你剛剛訓練好的模型
 model = YOLO(custom_model_path)
 
 # --- 測試圖片 ---
 # 找一張網路上的番茄照片，或是你自己拍的照片路徑
-image_path = './egg.jpg' 
+image_path = '.ingredients_dataset/test_picture/test_tofu1.jpg' 
 
 # 執行預測
 # conf=0.5 代表信心度大於 50% 才顯示，避免亂猜
-results = model.predict(source=image_path, save=True, conf=0.5)
+results = model.predict(source=image_path, save=True, conf=0.01)
 
 print(f"測試完成！結果圖片已儲存至: {results[0].save_dir}")
 
