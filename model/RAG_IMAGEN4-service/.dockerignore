@@ -1,0 +1,17 @@
+# Files with API keys
+upload_vector_data.py
+test_upload_small.py
+
+# Local testing files and data
+debug_csv.py
+list_models.py
+all_recipes.csv
+models.txt
+models_utf8.txt
+build_log.txt
+
+# System files
+__pycache__
+*.pyc
+.git
+.DS_Store
