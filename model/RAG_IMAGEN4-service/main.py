@@ -47,7 +47,7 @@ def init_rag_system():
         )
         
         # 3. 建立 LLM
-        llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.7)
+        llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.7)
         
         # 4. 建立 RAG 鏈
         template = """你是零剩食主廚，請根據資料庫回答：{context} 
@@ -72,7 +72,7 @@ def enrich_recipe_content(recipe_text):
     3. 生圖 Prompt (Image Prompt)
     """
     try:
-        llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.8)
+        llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.8)
         
         # 強制要求 JSON 格式
         prompt_template = """
@@ -216,159 +216,170 @@ def parse_metadata_text(meta_text):
 @app.route('/api/chef', methods=['POST'])
 def chef_api():
     """RAG Generation + Retrieval for Carousel (ALL with Images & Nutrition)"""
-    if qa_chain is None: init_rag_system()
-    
-    data = request.json
-    user_input = data.get('message', '')
-    ingredients_only = data.get('ingredients') # [New] Explicit ingredients
-    
-    from concurrent.futures import ThreadPoolExecutor
-    
-    # 1. Generate Main Recipe (AI Chef)
-    # ---------------------------------
-    res = qa_chain.invoke({"question": user_input, "chat_history": []})
-    gen_text = res["answer"]
-    
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        # Task A: Enrich Main Recipe
-        future_enrich_main = executor.submit(lambda: enrich_recipe_content(gen_text))
+    try:
+        if qa_chain is None: 
+            init_rag_system()
+        if qa_chain is None:
+            return jsonify({"error": "RAG System not initialized", "recipes": []}), 500
         
-        # 2. Retrieve Similar
-        recipes = []
-        gen_id = str(uuid.uuid4())
+        data = request.json
+        user_input = data.get('message', '')
+        ingredients_only = data.get('ingredients') # [New] Explicit ingredients
         
-        # [FIX] Use explicit ingredients for vector search if available
-        # Otherwise fall back to user_input, but ingredients_only is much cleaner.
-        query_text = ingredients_only if ingredients_only else user_input
-        print(f"🔍 Searching recipes with query: {query_text}")
-        gen_vector = embeddings_model.embed_query(query_text) 
+        from concurrent.futures import ThreadPoolExecutor
         
-        # Parse user ingredients for strict filtering
-        user_ingredients_list = [ing.strip().lower() for ing in query_text.split(',') if ing.strip()]
-        print(f"📋 User ingredients for filtering: {user_ingredients_list}")
+        # 1. Generate Main Recipe (AI Chef)
+        # ---------------------------------
+        res = qa_chain.invoke({"question": user_input, "chat_history": []})
+        gen_text = res["answer"]
         
-        query_res = None
-        if pc_client:
-            try:
-                idx = pc_client.Index(index_name)
-                # Fetch MORE candidates for post-filtering
-                query_res = idx.query(
-                    vector=gen_vector,
-                    top_k=15, # Larger pool for filtering
-                    include_metadata=True,
-                    namespace="recipe" 
-                )
-            except Exception as e:
-                print(f"⚠️ Retrieval failed: {e}")
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            # Task A: Enrich Main Recipe
+            future_enrich_main = executor.submit(lambda: enrich_recipe_content(gen_text))
+            
+            # 2. Retrieve Similar
+            recipes = []
+            gen_id = str(uuid.uuid4())
+            
+            # [FIX] Use explicit ingredients for vector search if available
+            query_text = ingredients_only if ingredients_only else user_input
+            print(f"🔍 Searching recipes with query: {query_text}")
+            gen_vector = embeddings_model.embed_query(query_text) 
+            
+            # [IMPROVED] Parse user ingredients - split by comma OR slash
+            import re
+            user_ingredients_list = [ing.strip().lower() for ing in re.split(r'[,/]', query_text) if ing.strip()]
+            print(f"📋 User ingredients for filtering: {user_ingredients_list}")
+            
+            query_res = None
+            if pc_client:
+                try:
+                    idx = pc_client.Index(index_name)
+                    # Fetch MORE candidates for post-filtering
+                    query_res = idx.query(
+                        vector=gen_vector,
+                        top_k=15, # Larger pool for filtering
+                        include_metadata=True,
+                        namespace="recipe" 
+                    )
+                except Exception as e:
+                    print(f"⚠️ Retrieval failed: {e}")
 
-        # Helper function to check ingredient containment
-        def recipe_contains_ingredients(recipe_text, ingredients_list):
-            """Check if recipe_text contains at least one of the user's ingredients"""
-            recipe_lower = recipe_text.lower()
-            for ing in ingredients_list:
-                if ing in recipe_lower:
-                    return True
-            return False
-                
-        # Task B & C: Enrich Retrieved Recipes (with strict filtering)
-        retrieved_futures = []
-        matched_count = 0
-        if query_res and query_res.matches:
-            for match in query_res.matches:
-                if matched_count >= 2: # Only need 2 retrieved recipes
-                    break
+            # Helper function to check ingredient containment
+            def recipe_contains_ingredients(recipe_text, ingredients_list):
+                """Check if recipe_text contains at least one of the user's ingredients"""
+                recipe_lower = recipe_text.lower()
+                for ing in ingredients_list:
+                    if ing in recipe_lower:
+                        return True
+                return False
                     
-                meta = match.metadata or {}
-                raw_text = meta.get('text', '')
-                
-                # [STRICT FILTER] Only include if recipe contains user's ingredients
-                if user_ingredients_list and not recipe_contains_ingredients(raw_text, user_ingredients_list):
-                    print(f"⏭️ Skipping recipe (no ingredient match): {raw_text[:50]}...")
-                    continue
+            # Task B & C: Enrich Retrieved Recipes (with strict filtering)
+            retrieved_futures = []
+            matched_count = 0
+            if query_res and query_res.matches:
+                print(f"📡 Pinecone found {len(query_res.matches)} matches")
+                for match in query_res.matches:
+                    if matched_count >= 4: # Increased to 4 DB recipes
+                        break
+                        
+                    meta = match.metadata or {}
+                    raw_text = meta.get('text', '')
                     
-                print(f"✅ Recipe matched: {raw_text[:50]}...")
-                matched_count += 1
-                
-                parsed = parse_metadata_text(raw_text)
-                combined_info = f"{parsed['title']}\n{raw_text[:500]}"
-                
-                future_enrich = executor.submit(lambda txt=combined_info: enrich_recipe_content(txt))
-                retrieved_futures.append({"match": match, "future": future_enrich})
+                    # [STRICT FILTER] Only include if recipe contains user's ingredients
+                    if user_ingredients_list and not recipe_contains_ingredients(raw_text, user_ingredients_list):
+                        print(f"⏭️ Skipping recipe (no match for {user_ingredients_list}): {raw_text[:50]}...")
+                        continue
+                        
+                    print(f"✅ Recipe matched: {raw_text[:50]}... (Score: {match.score})")
+                    matched_count += 1
+                    
+                    parsed = parse_metadata_text(raw_text)
+                    combined_info = f"{parsed['title']}\n{raw_text[:500]}"
+                    
+                    future_enrich = executor.submit(lambda txt=combined_info: enrich_recipe_content(txt))
+                    retrieved_futures.append({"match": match, "future": future_enrich})
+            else:
+                print("⚠️ No recipes found in Pinecone for this query.")
 
-        # ---------------------------------------------------------
-        # [OPTIMIZATION] Parallelize Image Generation for ALL recipes
-        # ---------------------------------------------------------
-        
-        # 1. Get Enrichment Results (Blocking slightly, but effectively parallel LLM calls)
-        enriched_main = future_enrich_main.result()
-        enriched_retrieved = []
-        for item in retrieved_futures:
-            enriched_retrieved.append({
-                "match": item['match'],
-                "data": item['future'].result()
-            })
+            # ---------------------------------------------------------
+            # [OPTIMIZATION] Parallelize Image Generation for ALL recipes
+            # ---------------------------------------------------------
             
-        # 2. Submit Image Generation Tasks in Parallel
-        # We use a NEW ThreadPool to ensure image calls (IO bound) don't block each other
-        img_futures = []
-        
-        # Main Recipe Image
-        future_img_main = executor.submit(lambda: call_imagen_api(enriched_main['image_prompt']))
-        
-        # Retrieved Recipes Images
-        for item in enriched_retrieved:
-            prompt = item['data']['image_prompt']
-            fut = executor.submit(lambda p=prompt: call_imagen_api(p))
-            img_futures.append({"item": item, "future": fut})
+            # 1. Get Enrichment Results (Blocking slightly, but effectively parallel LLM calls)
+            enriched_main = future_enrich_main.result()
+            enriched_retrieved = []
+            for item in retrieved_futures:
+                enriched_retrieved.append({
+                    "match": item['match'],
+                    "data": item['future'].result()
+                })
+                
+            # 2. Submit Image Generation Tasks in Parallel
+            # We use a NEW ThreadPool to ensure image calls (IO bound) don't block each other
+            img_futures = []
             
-        # 3. Collect Results
-        main_image_url = future_img_main.result()
-        
-        # Save Generated Recipe
-        if pc_client:
-            try:
-                idx = pc_client.Index(index_name)
-                idx.upsert(
-                    vectors=[{
-                        "id": gen_id, 
-                        "values": gen_vector, 
-                        "metadata": {
-                            "type": "generated",
-                            "title": enriched_main['title'],
-                            "text": gen_text, 
-                            "nutrition": enriched_main['nutrition'],
-                            "image_url": main_image_url or "",
-                            "created_at": time.time()
-                        }
-                    }],
-                    namespace="generated_cache"
-                )
-            except Exception as e: pass
+            # Main Recipe Image
+            future_img_main = executor.submit(lambda: call_imagen_api(enriched_main['image_prompt']))
+            
+            # Retrieved Recipes Images
+            for item in enriched_retrieved:
+                prompt = item['data']['image_prompt']
+                fut = executor.submit(lambda p=prompt: call_imagen_api(p))
+                img_futures.append({"item": item, "future": fut})
+                
+            # 3. Collect Results
+            main_image_url = future_img_main.result()
+            
+            # Save Generated Recipe
+            if pc_client:
+                try:
+                    idx = pc_client.Index(index_name)
+                    idx.upsert(
+                        vectors=[{
+                            "id": gen_id, 
+                            "values": gen_vector, 
+                            "metadata": {
+                                "type": "generated",
+                                "title": enriched_main['title'],
+                                "text": gen_text, 
+                                "nutrition": enriched_main['nutrition'],
+                                "image_url": main_image_url or "",
+                                "created_at": time.time()
+                            }
+                        }],
+                        namespace="generated_cache"
+                    )
+                except Exception as e: pass
 
-        recipes.append({
-            "id": gen_id,
-            "title": enriched_main['title'],
-            "summary": enriched_main['nutrition'],
-            "image_url": main_image_url,
-            "source": "generated"
-        })
-        
-        # Collect Retrieved Images
-        for img_job in img_futures:
-            item = img_job['item']
-            img_url = img_job['future'].result()
-            match = item['match']
-            enriched_data = item['data']
-            
             recipes.append({
-                "id": match.id,
-                "title": enriched_data['title'],
-                "summary": enriched_data['nutrition'], 
-                "image_url": img_url,
-                "source": "db"
+                "id": gen_id,
+                "title": enriched_main['title'],
+                "summary": enriched_main['nutrition'],
+                "image_url": main_image_url,
+                "source": "generated"
             })
+            
+            # Collect Retrieved Images
+            for img_job in img_futures:
+                item = img_job['item']
+                img_url = img_job['future'].result()
+                match = item['match']
+                enriched_data = item['data']
+                
+                recipes.append({
+                    "id": match.id,
+                    "title": enriched_data['title'],
+                    "summary": enriched_data['nutrition'], 
+                    "image_url": img_url,
+                    "source": "db"
+                })
 
-    return jsonify({"recipes": recipes})
+        return jsonify({"recipes": recipes})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e), "recipes": []}), 500
 
 @app.route('/api/recipe', methods=['GET'])
 def get_recipe():
@@ -444,6 +455,44 @@ def get_recipe():
         print(f"❌ Get recipe error: {e}")
 
     return jsonify({"error": "Recipe not found"}), 404
+
+
+@app.route('/api/store_recipe', methods=['POST'])
+def store_recipe():
+    """將生成的食譜存入 Pinecone 的 generated_cache 命名空間"""
+    data = request.get_json()
+    recipe_id = data.get('recipe_id')
+    text = data.get('text')
+    title = data.get('title', 'Generated Recipe')
+    
+    if not recipe_id or not text:
+        return jsonify({"error": "Missing recipe_id or text"}), 400
+        
+    try:
+        if pc_client:
+            idx = pc_client.Index(index_name)
+            # 生成 Embedding
+            vector = embeddings_model.embed_query(text[:1500])
+            
+            idx.upsert(
+                vectors=[{
+                    "id": recipe_id,
+                    "values": vector,
+                    "metadata": {
+                        "type": "generated",
+                        "title": title,
+                        "text": text,
+                        "created_at": time.time()
+                    }
+                }],
+                namespace="generated_cache"
+            )
+            return jsonify({"status": "success", "recipe_id": recipe_id})
+    except Exception as e:
+        print(f"❌ Store recipe error: {e}")
+        return jsonify({"error": str(e)}), 500
+    
+    return jsonify({"error": "Pinecone not initialized"}), 500
 
 
 @app.route('/api/like', methods=['POST'])
