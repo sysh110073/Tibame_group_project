@@ -192,6 +192,23 @@ def create_random_recommend_button(ingredients=None):
     )
     return FlexSendMessage(alt_text="試試別的推薦", contents=bubble)
 
+def clean_recipe_text(text):
+    """清理食譜文字內容：移除 dishname/Dishname、網址:\n\n、* 字元"""
+    if not text:
+        return text
+    # 刪除 dishname/Dishname
+    text = text.replace('Dishname', '食譜名稱')
+    text = text.replace('dishname', '食譜名稱')
+    text = text.replace('菜名', '食譜名稱')
+    text = text.replace(':', '：')
+    # 刪除 "網址:\n\n"
+    text = text.replace('網址:', '')
+    text = text.replace('網址：', '')  # 全形冒號版本
+    # 過濾掉 *
+    text = text.replace('*', '')
+    text = text.replace('#', '')
+    return text
+
 # ==========================================
 # 3. 服務呼叫
 # ==========================================
@@ -326,6 +343,8 @@ def handle_postback(event):
         recipe_data = get_full_recipe(recipe_id)
         if recipe_data:
             text = recipe_data.get('text', 'No content')
+            # 清理食譜文字內容
+            text = clean_recipe_text(text)
             # 傳送: 圖文 + 回饋按鈕 (內含隨便推薦)
             replies = [
                 TextSendMessage(text=text[:4900]),
@@ -452,6 +471,8 @@ def process_message_api():
                 recipe_data = get_full_recipe(recipe_id)
                 if recipe_data:
                     text = recipe_data.get('text', 'No content')
+                    # 清理食譜文字內容
+                    text = clean_recipe_text(text)
                     messages.append({'type': 'text', 'text': text[:4900]})
                     messages.append(create_feedback_flex(recipe_id, ingredients).as_json_dict())
                 else:
