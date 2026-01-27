@@ -193,7 +193,7 @@ def create_random_recommend_button(ingredients=None):
     return FlexSendMessage(alt_text="試試別的推薦", contents=bubble)
 
 def clean_recipe_text(text):
-    """清理食譜文字內容：移除 dishname/Dishname、網址:\n\n、* 字元"""
+    """清理食譜文字內容：移除 dishname/Dishname、網址:、* 字元"""
     if not text:
         return text
     # 刪除 dishname/Dishname
