@@ -1,6 +1,11 @@
-Flask==3.0.0
-gunicorn==21.2.0
-ultralytics>=8.3.0
-Pillow==10.2.0
-torch==2.5.1
-torchvision==0.20.1
+# Web Framework & Server
+Flask>=3.0.0
+gunicorn>=21.2.0
+
+# Image Processing (main.py 用到了 PIL)
+Pillow>=10.0.0
+
+# YOLO Core
+# 使用 headless 版本以避免 Cloud Run 缺少 libGL 錯誤，並減少體積
+opencv-python-headless>=4.8.0
+ultralytics

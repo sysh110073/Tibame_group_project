@@ -47,7 +47,7 @@ def init_rag_system():
         )
         
         # 3. 建立 LLM
-        llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.7)
+        llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.7)
         
         # 4. 建立 RAG 鏈
         template = """你是零剩食主廚，請根據資料庫回答：{context} 
@@ -72,7 +72,7 @@ def enrich_recipe_content(recipe_text):
     3. 生圖 Prompt (Image Prompt)
     """
     try:
-        llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.8)
+        llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.8)
         
         # 強制要求 JSON 格式
         prompt_template = """
@@ -224,7 +224,20 @@ def chef_api():
         
         data = request.json
         user_input = data.get('message', '')
-        ingredients_only = data.get('ingredients') # [New] Explicit ingredients
+        ingredients_only = data.get('ingredients') 
+        user_id = data.get('user_id', 'default_user')
+        
+        # [NEW] Pre-fetch user preference vector for reranking
+        user_vector = None
+        if user_id and pc_client:
+            try:
+                idx = pc_client.Index(index_name)
+                fetch_user = idx.fetch(ids=[user_id], namespace="users")
+                if user_id in fetch_user.vectors:
+                    user_vector = fetch_user.vectors[user_id].values
+                    print(f"👤 Found preference vector for user: {user_id}")
+            except Exception as e:
+                print(f"⚠️ User vector fetch failed: {e}")
         
         from concurrent.futures import ThreadPoolExecutor
         
@@ -249,58 +262,64 @@ def chef_api():
             # [IMPROVED] Parse user ingredients - split by comma OR slash
             import re
             user_ingredients_list = [ing.strip().lower() for ing in re.split(r'[,/]', query_text) if ing.strip()]
-            print(f"📋 User ingredients for filtering: {user_ingredients_list}")
             
             query_res = None
             if pc_client:
                 try:
-                    idx = pc_client.Index(index_name)
-                    # Fetch MORE candidates for post-filtering
+                    # [USER REQUEST] 1. 以偵測到的食材為主要查詢，先抓 50 名作為緩衝集
                     query_res = idx.query(
                         vector=gen_vector,
-                        top_k=15, # Larger pool for filtering
+                        top_k=50, 
                         include_metadata=True,
+                        include_values=True if user_vector else False,
                         namespace="recipe" 
                     )
                 except Exception as e:
                     print(f"⚠️ Retrieval failed: {e}")
 
-            # Helper function to check ingredient containment
+            # [USER REQUEST] 2. 再用使用者偏好向量去查詢前三名接近的食譜
+            matches = query_res.matches if query_res and query_res.matches else []
+            
+            # 先經過食材過濾
             def recipe_contains_ingredients(recipe_text, ingredients_list):
-                """Check if recipe_text contains at least one of the user's ingredients"""
+                if not ingredients_list: return True
                 recipe_lower = recipe_text.lower()
-                for ing in ingredients_list:
-                    if ing in recipe_lower:
-                        return True
-                return False
+                return any(ing in recipe_lower for ing in ingredients_list)
+
+            filtered_candidates = []
+            for m in matches:
+                raw_text = m.metadata.get('text', '')
+                if recipe_contains_ingredients(raw_text, user_ingredients_list):
+                    filtered_candidates.append(m)
+                else:
+                    print(f"⏭️ Skipping {m.id} (no ingredient match)")
+            
+            # 如果有偏好向量，進行重新排序 (Rerank)
+            if user_vector and filtered_candidates:
+                print(f"🎯 Reranking {len(filtered_candidates)} candidates by preference for {user_id}...")
+                def calc_pref(m):
+                    if not hasattr(m, 'values') or not m.values: return 0
+                    return sum(a * b for a, b in zip(m.values, user_vector))
+                filtered_candidates.sort(key=calc_pref, reverse=True)
+            
+            # 取前三名 (如使用者要求)
+            final_matches = filtered_candidates[:3]
                     
-            # Task B & C: Enrich Retrieved Recipes (with strict filtering)
+            # Task B & C: Enrich Retrieved Recipes
             retrieved_futures = []
-            matched_count = 0
-            if query_res and query_res.matches:
-                print(f"📡 Pinecone found {len(query_res.matches)} matches")
-                for match in query_res.matches:
-                    if matched_count >= 4: # Increased to 4 DB recipes
-                        break
-                        
-                    meta = match.metadata or {}
-                    raw_text = meta.get('text', '')
-                    
-                    # [STRICT FILTER] Only include if recipe contains user's ingredients
-                    if user_ingredients_list and not recipe_contains_ingredients(raw_text, user_ingredients_list):
-                        print(f"⏭️ Skipping recipe (no match for {user_ingredients_list}): {raw_text[:50]}...")
-                        continue
-                        
-                    print(f"✅ Recipe matched: {raw_text[:50]}... (Score: {match.score})")
-                    matched_count += 1
-                    
-                    parsed = parse_metadata_text(raw_text)
-                    combined_info = f"{parsed['title']}\n{raw_text[:500]}"
-                    
-                    future_enrich = executor.submit(lambda txt=combined_info: enrich_recipe_content(txt))
-                    retrieved_futures.append({"match": match, "future": future_enrich})
-            else:
-                print("⚠️ No recipes found in Pinecone for this query.")
+            for match in final_matches:
+                meta = match.metadata or {}
+                raw_text = meta.get('text', '')
+                print(f"✅ Recipe selected: {raw_text[:50]}... (Similarity: {match.score})")
+                
+                parsed = parse_metadata_text(raw_text)
+                combined_info = f"{parsed['title']}\n{raw_text[:500]}"
+                
+                future_enrich = executor.submit(lambda txt=combined_info: enrich_recipe_content(txt))
+                retrieved_futures.append({"match": match, "future": future_enrich})
+            
+            if not final_matches:
+                print("⚠️ No recipes found in Pinecone for this query after filtering.")
 
             # ---------------------------------------------------------
             # [OPTIMIZATION] Parallelize Image Generation for ALL recipes
@@ -557,70 +576,70 @@ def random_recommend():
     try:
         idx = pc_client.Index(index_name)
         
-        # 1. Determine Query Vector
+        # [USER REQUEST VERSION]
+        # 1. Always use ingredients as primary search vector if provided
+        # 2. Fetch top 10, then rerank by user preference vector
+        
+        user_vector = None
+        if user_id:
+            try:
+                fetch_res = idx.fetch(ids=[user_id], namespace="users")
+                if user_id in fetch_res.vectors:
+                    user_vector = fetch_res.vectors[user_id].values
+            except Exception: pass
+
         if ingredients:
             print(f"🥦 Contextual Recommend for {user_id} with ingredients: {ingredients}")
             query_vector = embeddings_model.embed_query(ingredients)
+            top_k = 10 
+        elif user_vector:
+            print(f"👤 Personalized for {user_id}")
+            query_vector = user_vector
+            top_k = 10
         else:
-            # 1b. User History or Cold Start
-            fetch_res = idx.fetch(ids=[user_id], namespace="users")
-            if user_id in fetch_res.vectors:
-                query_vector = fetch_res.vectors[user_id].values
-                print(f"👤 Personalized for {user_id}")
-            else:
-                import random
-                topics = ["Taiwanese Cuisine", "Healthy Salad", "Pasta", "Japanese Food", "Dessert", "Seafood"]
-                topic = random.choice(topics)
-                print(f"👤 Cold Start for {user_id}, topic: {topic}")
-                query_vector = embeddings_model.embed_query(topic)
-        
-        # 2. Search DB with larger K for variation
-        # [FIX] Fetch large pool for post-filtering
+            import random
+            topics = ["Taiwanese Cuisine", "Healthy Salad", "Pasta", "Japanese Food", "Dessert", "Seafood"]
+            topic = random.choice(topics)
+            print(f"👤 Cold Start for {user_id}, topic: {topic}")
+            query_vector = embeddings_model.embed_query(topic)
+            top_k = 10
         
         query_res = idx.query(
             vector=query_vector,
-            top_k=30, # Larger pool for filtering
+            top_k=50, # 擴大緩衝量
             include_metadata=True,
+            include_values=True if user_vector and ingredients else False, 
             namespace="recipe" 
         )
         
         # Parse user ingredients for strict filtering
         user_ingredients_list = []
         if ingredients:
-            user_ingredients_list = [ing.strip().lower() for ing in ingredients.split(',') if ing.strip()]
-            print(f"📋 Filtering by ingredients: {user_ingredients_list}")
+            user_ingredients_list = [ing.strip().lower() for ing in re.split(r'[,/]', ingredients) if ing.strip()]
         
-        # Helper function to check ingredient containment
         def recipe_contains_ingredients(recipe_text, ingredients_list):
-            """Check if recipe_text contains at least one of the user's ingredients"""
+            if not ingredients_list: return True
             recipe_lower = recipe_text.lower()
-            for ing in ingredients_list:
-                if ing in recipe_lower:
-                    return True
-            return False
+            return any(ing in recipe_lower for ing in ingredients_list)
         
-        # 3. Filter and Process Matches
-        matches = query_res.matches
-        filtered_matches = []
+        matches = query_res.matches if query_res and query_res.matches else []
+        filtered_candidates = []
         
         for match in matches:
-            if len(filtered_matches) >= 3:
-                break
             meta = match.metadata or {}
             raw_text = meta.get('text', '')
-            
-            # If we have ingredients, apply strict filter
-            if user_ingredients_list:
-                if recipe_contains_ingredients(raw_text, user_ingredients_list):
-                    print(f"✅ Match (ingredient): {raw_text[:50]}...")
-                    filtered_matches.append(match)
-                else:
-                    print(f"⏭️ Skip (no match): {raw_text[:50]}...")
-            else:
-                # No ingredients = cold start, accept any
-                filtered_matches.append(match)
+            if recipe_contains_ingredients(raw_text, user_ingredients_list):
+                filtered_candidates.append(match)
         
-        matches = filtered_matches
+        # [USER REQUEST] Rerank by preference if we queried by ingredients
+        if ingredients and user_vector and filtered_candidates:
+            print(f"🎯 Reranking recommend candidates by preference for {user_id}...")
+            def calc_pref(m):
+                if not hasattr(m, 'values') or not m.values: return 0
+                return sum(a * b for a, b in zip(m.values, user_vector))
+            filtered_candidates.sort(key=calc_pref, reverse=True)
+            
+        final_matches = filtered_candidates[:3]
         
         # [FIX] Use ThreadPool to Enrich Content (Title/Nutrition/Image)
         # This fixes the "blank" issue by properly parsing and generating missing info
@@ -629,7 +648,7 @@ def random_recommend():
         
         with ThreadPoolExecutor(max_workers=3) as executor:
             futures = []
-            for match in matches:
+            for match in final_matches:
                 meta = match.metadata or {}
                 raw_text = meta.get('text', '')
                 parsed = parse_metadata_text(raw_text)

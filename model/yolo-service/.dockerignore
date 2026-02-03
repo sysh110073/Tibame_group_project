@@ -1,0 +1,28 @@
+# .dockerignore
+
+# 忽略本地端的虛擬環境 (這是造成 3GB 的最大元兇)
+venv/
+.venv/
+env/
+
+# 忽略快取檔
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 忽略 Git 紀錄
+.git/
+.gitignore
+
+# 忽略訓練資料與結果 (如果有)
+datasets/
+runs/
+train/
+val/
+
+# 忽略其他不必要的檔案
+*.md
+Dockerfile
+docker-compose.yml
+.dockerignore

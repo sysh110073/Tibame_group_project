@@ -10,7 +10,7 @@ app = Flask(__name__)
 # 這樣使用者傳照片來時，不用等模型載入，速度會快很多
 print("正在載入模型，請稍候...")
 try:
-    model = YOLO('tibame_food_model_best_v1.pt')
+    model = YOLO('0202_yolov11n_best.pt')
     print("✅ 模型載入成功！")
 except Exception as e:
     print(f"❌ 模型載入失敗: {e}")
